@@ -48,6 +48,10 @@ export class InboxService {
   }
 
   private createFromEmbedded(data: any): Message {
+    if (!data.senderPublicKey) {
+      throw new Error('Invalid message data: senderPublicKey is missing');
+    }
+
     return Message.from({ ...data, sender: { keyType: data.senderKeyType, publicKey: data.senderPublicKey } });
   }
 
@@ -71,6 +75,9 @@ export class InboxService {
     const promises: Promise<any>[] = [];
     promises.push(this.storeIndex(message, embed));
     if (!embed) promises.push(this.storeFile(message));
+
+    // Update the Last-Modified timestamp
+    promises.push(this.updateLastModified(message.recipient));
 
     await Promise.all(promises);
   }
@@ -114,6 +121,44 @@ export class InboxService {
       } else {
         this.logger.error(`delete: failed to delete file '${hash}' from bucket storage`, error);
       }
+    }
+  }
+
+  async getLastModified(recipient: string): Promise<Date> {
+    const lastModified = await this.redis.get(`inbox:${recipient}:lastModified`);
+    return lastModified ? new Date(lastModified) : new Date(0);
+  }
+
+  async updateLastModified(recipient: string): Promise<void> {
+    const now = new Date().toISOString();
+    await this.redis.set(`inbox:${recipient}:lastModified`, now);
+  }
+
+  async getMessagesMetadata(recipient: string): Promise<MessageSummery[]> {
+    try {
+      const data = await this.redis.hgetall(`inbox:${recipient}`);
+
+      if (!data || Object.keys(data).length === 0) {
+        return [];
+      }
+
+      const messages: MessageSummery[] = Object.values(data)
+        .map((item: string) => {
+          try {
+            const message = JSON.parse(item);
+            const { data, sensitive, ...safeMessage } = message;
+            return safeMessage;
+          } catch (error) {
+            console.warn(`Failed to parse message item for ${recipient}`, error);
+            return null;
+          }
+        })
+        .filter((message): message is MessageSummery => message !== null);
+
+      return messages;
+    } catch (error) {
+      console.error(`Error retrieving messages for ${recipient}`, error);
+      throw new Error('Failed to retrieve message metadata');
     }
   }
 }
